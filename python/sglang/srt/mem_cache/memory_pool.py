@@ -1003,10 +1003,11 @@ class MambaPool:
             value = getattr(self.mamba_cache, field)
             if value is None:
                 continue
-            if isinstance(value, list):
-                state_tensors.extend(value)
-            else:
-                state_tensors.append(value)
+            tensors = value if isinstance(value, list) else [value]
+            # Backport of SGLang PR 35689 to v0.5.16: ShortConv has no
+            # temporal state, so it allocates an empty tensor.  Never
+            # advertise a zero-byte state buffer to RDMA registration.
+            state_tensors.extend(tensor for tensor in tensors if tensor.numel())
         data_ptrs, data_lens, item_lens = [], [], []
 
         for _, state_tensor in enumerate(state_tensors):
@@ -1047,10 +1048,9 @@ class MambaPool:
             value = getattr(self.mamba_cache, field)
             if value is None:
                 continue
-            if isinstance(value, list):
-                state_tensors.extend(value)
-            else:
-                state_tensors.append(value)
+            tensors = value if isinstance(value, list) else [value]
+            # Keep this parallel list aligned with get_contiguous_buf_infos.
+            state_tensors.extend(tensor for tensor in tensors if tensor.numel())
 
         dim_per_tensor = []
         for state_tensor in state_tensors:
@@ -1088,7 +1088,10 @@ class MambaPool:
             if value is None:
                 continue
             tensors = value if isinstance(value, list) else [value]
-            for _ in tensors:
+            for tensor in tensors:
+                # Keep this parallel list aligned with the registered buffers.
+                if tensor.numel() == 0:
+                    continue
                 # Only conv_state carries a q/k/v decomposition.
                 subdims = (
                     list(self.conv_shard_groups)
